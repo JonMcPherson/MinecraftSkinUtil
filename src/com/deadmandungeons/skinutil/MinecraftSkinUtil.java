@@ -192,37 +192,38 @@ public class MinecraftSkinUtil {
 	
 	private static BufferedImage getSkinPart(SkinTexture skin, SkinPart part, int size) throws IllegalArgumentException {
 		BufferedImage image = skin.getImage();
-		if (image.getWidth() != 64 || (image.getHeight() != 32 && image.getHeight() != 64)) {
-			throw new IllegalArgumentException("invalid image dimensions");
-		}
-		
-		// Is the skin the current large 64x64 version or legacy small 64x32 version
-		boolean largeSkin = image.getHeight() == 64;
 		
 		ImageArea partArea = part.area;
-		ImageArea overlayArea = part.overlay.area;
+		ImageArea overlayArea = part.overlayArea;
 		
 		// Is the given part not available for small skins
-		boolean useSmallSkinPart = !largeSkin && part.smallSkinPart != null;
+		boolean useSmallSkinPart = !skin.largeSkin && part.smallSkinPart != null;
 		if (useSmallSkinPart) {
 			partArea = part.smallSkinPart.area;
-			overlayArea = part.smallSkinPart.overlay.area;
+			overlayArea = part.smallSkinPart.overlayArea;
 		} else if (skin.slimSkin && part.slimSkinPart != null) {
 			partArea = part.slimSkinPart.area;
-			overlayArea = part.slimSkinPart.overlay.area;
+			overlayArea = part.slimSkinPart.overlayArea;
 		}
 		
-		int w = size * partArea.w;
-		int h = size * partArea.h;
+		// Get skin part image from texture image as the base layer and set non-opaque pixels to black
+		BufferedImage partImage = image.getSubimage(partArea.x, partArea.y, partArea.w, partArea.h);
+		for (int x = 0; x < partImage.getWidth(); ++x) {
+			for (int y = 0; y < partImage.getHeight(); ++y) {
+				int pixel = partImage.getRGB(x, y);
+				if (!isOpaque(pixel)) {
+					partImage.setRGB(x, y, 0xFF000000);
+				}
+			}
+		}
 		
-		BufferedImage partImage = new BufferedImage(w, h, image.getType());
-		
-		BufferedImage partSubimage = image.getSubimage(partArea.x, partArea.y, partArea.w, partArea.h);
-		drawSkinPart(partImage, partSubimage, size, false);
-		
-		if (overlayArea.y < 32 || largeSkin) {
-			BufferedImage overlaySubimage = image.getSubimage(overlayArea.x, overlayArea.y, overlayArea.w, overlayArea.h);
-			drawSkinPart(partImage, overlaySubimage, size, true);
+		// Draw skin part overlay layer if applicable
+		if (skin.hasOverlay(overlayArea)) {
+			BufferedImage overlayImage = image.getSubimage(overlayArea.x, overlayArea.y, overlayArea.w, overlayArea.h);
+			
+			Graphics graphics = partImage.getGraphics();
+			graphics.drawImage(overlayImage, 0, 0, null);
+			graphics.dispose();
 		}
 		
 		// Small skins have the right arm and leg parts flipped for the left side
@@ -230,26 +231,39 @@ public class MinecraftSkinUtil {
 			partImage = flipImage(partImage);
 		}
 		
+		// Finally resize the image if needed
+		if (size > 1) {
+			BufferedImage enlargedPartImage = new BufferedImage(size * partArea.w, size * partArea.h, image.getType());
+			for (int x = 0; x < partArea.w; ++x) {
+				for (int y = 0; y < partArea.h; ++y) {
+					int pixel = partImage.getRGB(x, y);
+					drawSquare(enlargedPartImage, x * size, y * size, size, pixel);
+				}
+			}
+			partImage = enlargedPartImage;
+		}
+		
 		return partImage;
 	}
 	
-	private static void drawSkinPart(BufferedImage partImage, BufferedImage partSubimage, int size, boolean ignoreTransparent) {
-		for (int x = 0; x < partImage.getWidth(); ++x) {
-			for (int y = 0; y < partImage.getHeight(); ++y) {
-				int pixel = partSubimage.getRGB(x / size, y / size);
-				if (!ignoreTransparent || pixel >> 24 != 0) {
-					partImage.setRGB(x, y, pixel);
-				}
-			}
-		}
-	}
 	
 	private static BufferedImage flipImage(BufferedImage image) {
 		AffineTransform tx = AffineTransform.getScaleInstance(-1, 1);
 		tx.translate(-(image.getWidth(null)), 0);
 		AffineTransformOp op = new AffineTransformOp(tx, AffineTransformOp.TYPE_NEAREST_NEIGHBOR);
-		image = op.filter(image, null);
-		return image;
+		return op.filter(image, null);
+	}
+	
+	private static void drawSquare(BufferedImage image, int x, int y, int size, int pixel) {
+		for (int px = 0; px < size; ++px) {
+			for (int py = 0; py < size; ++py) {
+				image.setRGB(x + px, y + py, pixel);
+			}
+		}
+	}
+	
+	private static boolean isOpaque(int pixel) {
+		return ((pixel >> 24) & 0xFF) == 0xFF;
 	}
 	
 	private static void validateSize(double size) {
@@ -308,13 +322,25 @@ public class MinecraftSkinUtil {
 	 */
 	public static class SkinTexture extends SkinImage {
 		
+		private static final ImageArea[] RIGHT_DEAD_AREAS = { new ImageArea(32, 0, 8, 8), new ImageArea(56, 0, 8, 8), new ImageArea(36, 16, 8, 4),
+				new ImageArea(52, 16, 12, 4), new ImageArea(56, 20, 8, 12) };
+		
 		private final boolean slimSkin;
 		private final boolean defaultSkin;
 		
+		private final boolean largeSkin;
+		private Boolean hasOverlay;
+		
 		private SkinTexture(BufferedImage image, boolean slimSkin, boolean defaultSkin) {
 			super(image);
+			if (image.getWidth() != 64 || (image.getHeight() != 32 && image.getHeight() != 64)) {
+				throw new IllegalArgumentException("invalid image dimensions");
+			}
+			
 			this.slimSkin = slimSkin;
 			this.defaultSkin = defaultSkin;
+			
+			largeSkin = image.getHeight() == 64;
 		}
 		
 		/**
@@ -331,6 +357,29 @@ public class MinecraftSkinUtil {
 		 */
 		public boolean isDefaultSkin() {
 			return defaultSkin;
+		}
+		
+		private boolean hasOverlay(ImageArea overlayArea) {
+			if (hasOverlay == null) {
+				// In small 64x32 skins, if all of the "dead areas" on the right 32x32 half are opaque, the head overlay will not be used
+				hasOverlay = largeSkin || !isDeadAreaOpaque(getImage());
+			}
+			return hasOverlay && (overlayArea.y < 32 || largeSkin);
+		}
+		
+		private static boolean isDeadAreaOpaque(BufferedImage skinImage) {
+			for (ImageArea deadArea : RIGHT_DEAD_AREAS) {
+				BufferedImage deadAreaImage = skinImage.getSubimage(deadArea.x, deadArea.y, deadArea.w, deadArea.h);
+				for (int x = 0; x < deadArea.w; ++x) {
+					for (int y = 0; y < deadArea.h; ++y) {
+						int pixel = deadAreaImage.getRGB(x, y);
+						if (!isOpaque(pixel)) {
+							return false;
+						}
+					}
+				}
+			}
+			return true;
 		}
 		
 	}
@@ -381,10 +430,9 @@ public class MinecraftSkinUtil {
 		ARM_LEFT_BACK(44, 52, 4, 12, ARM_RIGHT_BACK, SlimSkinPart.ARM_LEFT_BACK);
 		
 		private final ImageArea area;
+		private final ImageArea overlayArea;
 		private final SkinPart smallSkinPart;
 		private final SlimSkinPart slimSkinPart;
-		
-		private final SkinPartOverlay overlay;
 		
 		private SkinPart(int x, int y, int w, int h) {
 			this(x, y, w, h, null, null);
@@ -400,10 +448,11 @@ public class MinecraftSkinUtil {
 		
 		private SkinPart(int x, int y, int w, int h, SkinPart smallSkinPart, SlimSkinPart slimSkinPart) {
 			area = new ImageArea(x, y, w, h);
+			SkinPartOverlay overlay = SkinPartOverlay.valueOf(name());
+			overlayArea = new ImageArea(overlay.x, overlay.y, w, h);
 			this.smallSkinPart = smallSkinPart;
 			this.slimSkinPart = slimSkinPart;
 			
-			overlay = SkinPartOverlay.valueOf(name());
 			boolean largeSkinsOnly = y >= 32;
 			if (largeSkinsOnly && smallSkinPart == null) {
 				throw new IllegalArgumentException();
@@ -413,48 +462,49 @@ public class MinecraftSkinUtil {
 	}
 	
 	private static enum SkinPartOverlay {
-		HEAD_TOP(40, 0, 8, 8),
-		HEAD_BOTTOM(48, 0, 8, 8),
-		HEAD_RIGHT(32, 8, 8, 8),
-		HEAD_FRONT(40, 8, 8, 8),
-		HEAD_LEFT(48, 8, 8, 8),
-		HEAD_BACK(56, 8, 8, 8),
+		HEAD_TOP(40, 0),
+		HEAD_BOTTOM(48, 0),
+		HEAD_RIGHT(32, 8),
+		HEAD_FRONT(40, 8),
+		HEAD_LEFT(48, 8),
+		HEAD_BACK(56, 8),
 		// below: skin parts available in MC 1.8 for large 64x64 skins
-		LEG_RIGHT_TOP(4, 32, 4, 4),
-		LEG_RIGHT_BOTTOM(8, 32, 4, 4),
-		LEG_RIGHT_OUTSIDE(0, 36, 4, 12),
-		LEG_RIGHT_FRONT(4, 36, 4, 12),
-		LEG_RIGHT_INSIDE(8, 36, 4, 12),
-		LEG_RIGHT_BACK(12, 36, 4, 12),
-		BODY_TOP(20, 32, 8, 4),
-		BODY_BOTTOM(28, 32, 8, 4),
-		BODY_RIGHT(16, 36, 4, 12),
-		BODY_FRONT(20, 36, 8, 12),
-		BODY_LEFT(28, 36, 4, 12),
-		BODY_BACK(32, 36, 8, 12),
-		ARM_RIGHT_TOP(44, 16, 4, 4),
-		ARM_RIGHT_BOTTOM(48, 16, 4, 4),
-		ARM_RIGHT_OUTSIDE(40, 20, 4, 12),
-		ARM_RIGHT_FRONT(44, 20, 4, 12),
-		ARM_RIGHT_INSIDE(48, 20, 4, 12),
-		ARM_RIGHT_BACK(52, 20, 4, 12),
-		LEG_LEFT_TOP(4, 48, 4, 4),
-		LEG_LEFT_BOTTOM(8, 48, 4, 4),
-		LEG_LEFT_OUTSIDE(0, 52, 4, 12),
-		LEG_LEFT_FRONT(4, 52, 4, 12),
-		LEG_LEFT_INSIDE(8, 52, 4, 12),
-		LEG_LEFT_BACK(12, 52, 4, 12),
-		ARM_LEFT_TOP(52, 48, 4, 4),
-		ARM_LEFT_BOTTOM(56, 48, 4, 4),
-		ARM_LEFT_OUTSIDE(48, 52, 4, 12),
-		ARM_LEFT_FRONT(52, 52, 4, 12),
-		ARM_LEFT_INSIDE(56, 52, 4, 12),
-		ARM_LEFT_BACK(60, 52, 4, 12);
+		LEG_RIGHT_TOP(4, 32),
+		LEG_RIGHT_BOTTOM(8, 32),
+		LEG_RIGHT_OUTSIDE(0, 36),
+		LEG_RIGHT_FRONT(4, 36),
+		LEG_RIGHT_INSIDE(8, 36),
+		LEG_RIGHT_BACK(12, 36),
+		BODY_TOP(20, 32),
+		BODY_BOTTOM(28, 32),
+		BODY_RIGHT(16, 36),
+		BODY_FRONT(20, 36),
+		BODY_LEFT(28, 36),
+		BODY_BACK(32, 36),
+		ARM_RIGHT_TOP(44, 16),
+		ARM_RIGHT_BOTTOM(48, 16),
+		ARM_RIGHT_OUTSIDE(40, 20),
+		ARM_RIGHT_FRONT(44, 20),
+		ARM_RIGHT_INSIDE(48, 20),
+		ARM_RIGHT_BACK(52, 20),
+		LEG_LEFT_TOP(4, 48),
+		LEG_LEFT_BOTTOM(8, 48),
+		LEG_LEFT_OUTSIDE(0, 52),
+		LEG_LEFT_FRONT(4, 52),
+		LEG_LEFT_INSIDE(8, 52),
+		LEG_LEFT_BACK(12, 52),
+		ARM_LEFT_TOP(52, 48),
+		ARM_LEFT_BOTTOM(56, 48),
+		ARM_LEFT_OUTSIDE(48, 52),
+		ARM_LEFT_FRONT(52, 52),
+		ARM_LEFT_INSIDE(56, 52),
+		ARM_LEFT_BACK(60, 52);
 		
-		private final ImageArea area;
+		private final int x, y;
 		
-		private SkinPartOverlay(int x, int y, int w, int h) {
-			area = new ImageArea(x, y, w, h);
+		private SkinPartOverlay(int x, int y) {
+			this.x = x;
+			this.y = y;
 		}
 		
 	}
@@ -470,29 +520,31 @@ public class MinecraftSkinUtil {
 		ARM_LEFT_BACK(43, 52, 3, 12);
 		
 		private final ImageArea area;
-		private final SlimSkinPartOverlay overlay;
+		private final ImageArea overlayArea;
 		
 		private SlimSkinPart(int x, int y, int w, int h) {
 			area = new ImageArea(x, y, w, h);
 			
-			overlay = SlimSkinPartOverlay.valueOf(name());
+			SlimSkinPartOverlay overlay = SlimSkinPartOverlay.valueOf(name());
+			overlayArea = new ImageArea(overlay.x, overlay.y, w, h);
 		}
 	}
 	
 	private static enum SlimSkinPartOverlay {
-		ARM_RIGHT_TOP(44, 16, 3, 4),
-		ARM_RIGHT_BOTTOM(47, 16, 3, 4),
-		ARM_RIGHT_FRONT(44, 20, 3, 12),
-		ARM_RIGHT_BACK(51, 20, 3, 12),
-		ARM_LEFT_TOP(52, 48, 3, 4),
-		ARM_LEFT_BOTTOM(55, 48, 3, 4),
-		ARM_LEFT_FRONT(52, 52, 3, 12),
-		ARM_LEFT_BACK(59, 52, 3, 12);
+		ARM_RIGHT_TOP(44, 16),
+		ARM_RIGHT_BOTTOM(47, 16),
+		ARM_RIGHT_FRONT(44, 20),
+		ARM_RIGHT_BACK(51, 20),
+		ARM_LEFT_TOP(52, 48),
+		ARM_LEFT_BOTTOM(55, 48),
+		ARM_LEFT_FRONT(52, 52),
+		ARM_LEFT_BACK(59, 52);
 		
-		private final ImageArea area;
+		private final int x, y;
 		
-		private SlimSkinPartOverlay(int x, int y, int w, int h) {
-			area = new ImageArea(x, y, w, h);
+		private SlimSkinPartOverlay(int x, int y) {
+			this.x = x;
+			this.y = y;
 		}
 		
 	}
