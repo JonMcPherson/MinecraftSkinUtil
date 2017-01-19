@@ -21,6 +21,13 @@
 		</plugins>
 	</build>
 
+	<repositories>
+		<repository>
+			<id>deadman-dungeons</id>
+			<url>https://deadmandungeons.com/artifactory/public</url>
+		</repository>
+	</repositories>
+
 	<dependencies>
 
 		<dependency>
